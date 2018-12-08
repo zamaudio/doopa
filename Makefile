@@ -1,3 +1,5 @@
+# This is doopa's Makefile
+
 CXX=g++
 
 all:
