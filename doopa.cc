@@ -28,24 +28,38 @@
 #include <unordered_map>
 #include <tuple>
 #include <utility>
+#include <functional>
 
-#include "htslib/hts.h"
 #include "htslib/hfile.h"
 #include "htslib/sam.h"
 
-typedef std::tuple<int32_t, int32_t, int32_t> chrposlen_t;
-
-struct key_hash : public std::unary_function<chrposlen_t, std::size_t>
-{
-   std::size_t operator()(const chrposlen_t& k) const
-   {
-      return (std::hash<int>{}(std::get<0>(k)) ^
-              std::hash<int>{}(std::get<1>(k)) ^
-              std::hash<int>{}(std::get<2>(k)));
-   }
+struct cheater {
+    int one, two, three, reads;
 };
 
-typedef std::unordered_map<chrposlen_t, bool, key_hash> doopa_t;
+typedef std::tuple<int32_t, int32_t, int32_t> chrposlen_t;
+
+// Pack into 64 bits:
+// chr  start   len
+// ff fffffffe 1ffffff
+uint64_t key_hash(const chrposlen_t& k) {
+    return ((((uint64_t)std::get<0>(k) & 0xff) << 56) |
+            (((uint64_t)std::get<1>(k) & 0x7fffffff) << 25) |
+             ((uint64_t)std::get<2>(k) & 0x1ffffff) );
+}
+
+bool key_equal(const chrposlen_t& v1, const chrposlen_t& v2) {
+    /*
+    return ( (std::get<0>(v1) == std::get<0>(v2)) &&
+             (std::get<1>(v1) == std::get<1>(v2)) &&
+             (std::get<2>(v1) == std::get<2>(v2)));
+    */
+    return (key_hash(v1) == key_hash(v2));
+}
+
+typedef std::unordered_map<chrposlen_t, std::string,
+        std::function<uint64_t(const chrposlen_t&)>,
+        std::function<bool(const chrposlen_t&, const chrposlen_t&)> > doopa_t;
 
 void error(const char *format, ...)
 {
@@ -70,9 +84,9 @@ static void dedup_sam(samFile *in, const char *filename)
 {
     int ret = 0;
     char region[128] = { 0 };
-    int32_t chr, start, stop;
-    doopa_t mp;
-    
+    int32_t chr, start, stop, len, reads = 0;
+    struct cheater *getreads;
+
     bam1_t *b = NULL;
     bam_hdr_t *hdr = NULL;
     samFile *out = NULL;
@@ -81,8 +95,11 @@ static void dedup_sam(samFile *in, const char *filename)
 
     if ((idx = sam_index_load(in, filename)) == 0) {
         error("cannot open bam index");
-        goto clean;
+        exit(1);
     }
+
+    getreads = (struct cheater *)idx;
+    doopa_t mp((doopa_t::size_type)getreads->reads, key_hash, key_equal);
 
     hdr = sam_hdr_read(in);
     if (hdr == NULL) {
@@ -106,22 +123,26 @@ static void dedup_sam(samFile *in, const char *filename)
         goto clean;
     }
 
+    error("Found %d reads, deduping...", getreads->reads);
+
     while (sam_itr_next(in, iter, b) >= 0) {
         if (b->core.tid < 0) {
             continue;
         }
-        mp[{b->core.tid, b->core.pos, bam_endpos(b)}] = true;
+        reads++;
+        chr = b->core.tid;
+        start = b->core.pos;
+        stop = bam_endpos(b);
+        len = stop - start;
+        snprintf(region, 64, "%s:%d-%d", hdr->target_name[chr], start, stop);
+        mp[{chr, start, len}] = std::string(region);
     }
     hts_itr_destroy(iter);
 
-    error("Finished deduping, now writing output");
+    error("Found %d mapped reads, deduped to %d reads, now writing output", reads, mp.size());
 
     for (doopa_t::iterator itr = mp.begin(); itr != mp.end(); ++itr) {
-        chr = std::get<0>(itr->first);
-        start = std::get<1>(itr->first);
-        stop = std::get<2>(itr->first);
-        snprintf(region, 64, "%s:%d-%d", hdr->target_name[chr], start, stop);
-        iter = sam_itr_querys(idx, hdr, region);
+        iter = sam_itr_querys(idx, hdr, itr->second.c_str());
         ret = sam_itr_next(in, iter, b);
         if (sam_write1(out, hdr, b) < 0) {
             error("writing to standard output failed");
