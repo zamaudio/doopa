@@ -143,12 +143,14 @@ static void dedup_sam(samFile *in, const char *filename)
 	         (b->core.pos != std::get<1>(itr->first)) ||
 		 (bam_endpos(b) != std::get<1>(itr->first) + 
 		                   std::get<2>(itr->first)));
+        /*
         error("f %s:%d-%d b= %s:%d-%d", hdr->target_name[std::get<0>(itr->first)], 
 				std::get<1>(itr->first),
 				std::get<1>(itr->first) + std::get<2>(itr->first),
 				hdr->target_name[b->core.tid],
 				b->core.pos,
 				bam_endpos(b));
+	*/
 	if (sam_write1(out, hdr, b) < 0) {
             error("writing to standard output failed");
             goto clean;
