@@ -33,10 +33,6 @@
 #include "htslib/hfile.h"
 #include "htslib/sam.h"
 
-struct cheater {
-    int one, two, three, reads;
-};
-
 typedef std::tuple<int32_t, int32_t, int32_t> chrposlen_t;
 
 // Pack into 64 bits:
@@ -49,11 +45,11 @@ uint64_t key_hash(const chrposlen_t& k) {
 }
 
 bool key_equal(const chrposlen_t& v1, const chrposlen_t& v2) {
-    /*
+/*
     return ( (std::get<0>(v1) == std::get<0>(v2)) &&
              (std::get<1>(v1) == std::get<1>(v2)) &&
              (std::get<2>(v1) == std::get<2>(v2)));
-    */
+*/
     return (key_hash(v1) == key_hash(v2));
 }
 
@@ -85,7 +81,6 @@ static void dedup_sam(samFile *in, const char *filename)
     int ret = 0;
     char region[128] = { 0 };
     int32_t chr, start, stop, len, reads = 0;
-    struct cheater *getreads;
 
     bam1_t *b = NULL;
     bam_hdr_t *hdr = NULL;
@@ -98,8 +93,7 @@ static void dedup_sam(samFile *in, const char *filename)
         exit(1);
     }
 
-    getreads = (struct cheater *)idx;
-    doopa_t mp((doopa_t::size_type)getreads->reads, key_hash, key_equal);
+    doopa_t mp((doopa_t::size_type)1000000, key_hash, key_equal);
 
     hdr = sam_hdr_read(in);
     if (hdr == NULL) {
@@ -123,8 +117,7 @@ static void dedup_sam(samFile *in, const char *filename)
         goto clean;
     }
 
-    error("Found %d reads, deduping...", getreads->reads);
-
+    error("Start deduping...");
     while (sam_itr_next(in, iter, b) >= 0) {
         if (b->core.tid < 0) {
             continue;
@@ -135,6 +128,7 @@ static void dedup_sam(samFile *in, const char *filename)
         stop = bam_endpos(b);
         len = stop - start;
         snprintf(region, 64, "%s:%d-%d", hdr->target_name[chr], start, stop);
+        //error("m %s", region);
         mp[{chr, start, len}] = std::string(region);
     }
     hts_itr_destroy(iter);
@@ -143,8 +137,19 @@ static void dedup_sam(samFile *in, const char *filename)
 
     for (doopa_t::iterator itr = mp.begin(); itr != mp.end(); ++itr) {
         iter = sam_itr_querys(idx, hdr, itr->second.c_str());
-        ret = sam_itr_next(in, iter, b);
-        if (sam_write1(out, hdr, b) < 0) {
+	do {
+	    ret = sam_itr_next(in, iter, b);
+	} while ((b->core.tid != std::get<0>(itr->first)) ||
+	         (b->core.pos != std::get<1>(itr->first)) ||
+		 (bam_endpos(b) != std::get<1>(itr->first) + 
+		                   std::get<2>(itr->first)));
+        error("f %s:%d-%d b= %s:%d-%d", hdr->target_name[std::get<0>(itr->first)], 
+				std::get<1>(itr->first),
+				std::get<1>(itr->first) + std::get<2>(itr->first),
+				hdr->target_name[b->core.tid],
+				b->core.pos,
+				bam_endpos(b));
+	if (sam_write1(out, hdr, b) < 0) {
             error("writing to standard output failed");
             goto clean;
         }
