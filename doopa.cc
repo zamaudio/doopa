@@ -39,34 +39,22 @@ struct key_hash : public std::unary_function<chrposlen_t, std::size_t>
 {
    std::size_t operator()(const chrposlen_t& k) const
    {
-      return std::get<0>(k) ^ std::get<1>(k) ^ std::get<2>(k);
+      return (std::hash<int>{}(std::get<0>(k)) ^
+              std::hash<int>{}(std::get<1>(k)) ^
+              std::hash<int>{}(std::get<2>(k)));
    }
 };
 
-struct key_equal : public std::binary_function<chrposlen_t, chrposlen_t, bool>
-{
-   bool operator()(const chrposlen_t& v0, const chrposlen_t& v1) const
-   {
-      return (
-               std::get<0>(v0) == std::get<0>(v1) &&
-               std::get<1>(v0) == std::get<1>(v1) &&
-               std::get<2>(v0) == std::get<2>(v1)
-             );
-   }
-};
-
-typedef std::unordered_map<chrposlen_t, int64_t, key_hash, key_equal> doopa_t;
+typedef std::unordered_map<chrposlen_t, bool, key_hash> doopa_t;
 
 void error(const char *format, ...)
 {
-    int err = errno;
     va_list args;
     va_start(args, format);
     fflush(stdout);
     fprintf(stderr, "doopa: ");
     vfprintf(stderr, format, args);
-    if (err) fprintf(stderr, ": %s\n", strerror(err));
-    else fprintf(stderr, "\n");
+    fprintf(stderr, "\n");
     fflush(stderr);
     va_end(args);
 }
@@ -81,6 +69,8 @@ static htsFile *dup_stdout(const char *mode)
 static void dedup_sam(samFile *in, const char *filename)
 {
     int ret = 0;
+    char region[128] = { 0 };
+    int32_t chr, start, stop;
     doopa_t mp;
     
     bam1_t *b = NULL;
@@ -90,7 +80,7 @@ static void dedup_sam(samFile *in, const char *filename)
     hts_itr_t *iter = NULL;
 
     if ((idx = sam_index_load(in, filename)) == 0) {
-            error("cannot open bam index");
+        error("cannot open bam index");
         goto clean;
     }
 
@@ -111,31 +101,38 @@ static void dedup_sam(samFile *in, const char *filename)
     b = bam_init1();
     if (b == NULL) { error("can't create record"); goto clean; }
 
-    iter = sam_itr_queryi(idx, HTS_IDX_START, 0, 0);
-
-    while (1) {
-        ret = iter? sam_itr_next(in, iter, b) : sam_read1(in, hdr, b);
-        if (ret < 0) {
-                break;
-        }
-        mp[std::make_tuple(b->core.tid, b->core.pos, bam_endpos(b))] = iter->tid;
+    if ((iter = sam_itr_queryi(idx, HTS_IDX_START, 0, 0)) == 0) {
+        error("can't create iterator from start");
+        goto clean;
     }
 
-    for (doopa_t::iterator itr = mp.begin(); itr != mp.end(); ++itr) {
-        iter = sam_itr_queryi(idx, itr->second, std::get<1>(itr->first), std::get<2>(itr->first));
-        ret = iter? sam_itr_next(in, iter, b) : sam_read1(in, hdr, b);
-        if (ret < 0) {
-            error("can't find read in bam");
-            goto clean;
+    while (sam_itr_next(in, iter, b) >= 0) {
+        if (b->core.tid < 0) {
+            continue;
         }
+        mp[{b->core.tid, b->core.pos, bam_endpos(b)}] = true;
+    }
+    hts_itr_destroy(iter);
+
+    error("Finished deduping, now writing output");
+
+    for (doopa_t::iterator itr = mp.begin(); itr != mp.end(); ++itr) {
+        chr = std::get<0>(itr->first);
+        start = std::get<1>(itr->first);
+        stop = std::get<2>(itr->first);
+        snprintf(region, 64, "%s:%d-%d", hdr->target_name[chr], start, stop);
+        iter = sam_itr_querys(idx, hdr, region);
+        ret = sam_itr_next(in, iter, b);
         if (sam_write1(out, hdr, b) < 0) {
             error("writing to standard output failed");
             goto clean;
         }
+        hts_itr_destroy(iter);
     }
 
+    error("Done");
+
  clean:
-    hts_itr_destroy(iter);
     hts_idx_destroy(idx);
     bam_hdr_destroy(hdr);
     bam_destroy1(b);
@@ -151,12 +148,12 @@ int main(int argc, char **argv)
         fp = hopen(argv[1], "r");
         if (fp == NULL) {
             error("can't open \"%s\"", argv[1]);
-	    return 1;
-	}
+            return 1;
+        }
         hts = hts_hopen(fp, argv[1], "r");
     } else {
         error("need bam file path and bai to exist");
-	return 1;
+        return 1;
     }
 
     if (hts) {
