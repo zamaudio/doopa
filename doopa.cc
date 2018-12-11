@@ -34,29 +34,28 @@
 #include "htslib/hfile.h"
 #include "htslib/sam.h"
 
-typedef std::tuple<int32_t, int32_t, int32_t> chrposlen_t;
+typedef uint64_t chrposlen_t;
 
-// Pack into 64 bits:
-// chr  start   len
-// ff fffffffe 1ffffff
 uint64_t key_hash(const chrposlen_t& k) {
-    return ((((uint64_t)std::get<0>(k) & 0xff) << 56) |
-            (((uint64_t)std::get<1>(k) & 0x7fffffff) << 25) |
-             ((uint64_t)std::get<2>(k) & 0x1ffffff) );
+    return k;
 }
 
 bool key_equal(const chrposlen_t& v1, const chrposlen_t& v2) {
-/*
-    return ( (std::get<0>(v1) == std::get<0>(v2)) &&
-             (std::get<1>(v1) == std::get<1>(v2)) &&
-             (std::get<2>(v1) == std::get<2>(v2)));
-*/
-    return (key_hash(v1) == key_hash(v2));
+    return (v1 == v2);
 }
 
 typedef std::unordered_map<chrposlen_t, uint64_t,
         std::function<uint64_t(const chrposlen_t&)>,
         std::function<bool(const chrposlen_t&, const chrposlen_t&)> > doopa_t;
+
+// Pack into 64 bits:
+// chr  start   len
+// ff8 7fffffff ffffff
+#define PACK_CHRPOSLEN(chr, pos, len) \
+    (uint64_t)( (((uint64_t)(chr) & 0x1ff) << 55) | \
+                (((uint64_t)(pos) & 0x7fffffff) << 24) | \
+                 ((uint64_t)(len) & 0xffffff) \
+              )
 
 void error(const char *format, ...)
 {
@@ -126,7 +125,7 @@ static void dedup_sam(samFile *in, const char *filename)
         start = b->core.pos;
         stop = bam_endpos(b);
         len = stop - start;
-        mp[{chr, start, len}] = reads;
+        mp[PACK_CHRPOSLEN(chr, start, len)] = reads;
         reads++;
     }
     hts_itr_destroy(iter);
@@ -149,7 +148,7 @@ static void dedup_sam(samFile *in, const char *filename)
         start = b->core.pos;
         stop = bam_endpos(b);
         len = stop - start;
-        if (mp[{chr, start, len}] == reads) {
+        if (mp[PACK_CHRPOSLEN(chr, start, len)] == reads) {
             if (sam_write1(out, hdr, b) < 0) {
                 error("writing to standard output failed");
                 goto clean;
