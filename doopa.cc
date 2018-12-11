@@ -25,6 +25,7 @@
 #include <string.h>
 #include <getopt.h>
 #include <unistd.h>
+#include <inttypes.h>
 #include <unordered_map>
 #include <tuple>
 #include <utility>
@@ -53,7 +54,7 @@ bool key_equal(const chrposlen_t& v1, const chrposlen_t& v2) {
     return (key_hash(v1) == key_hash(v2));
 }
 
-typedef std::unordered_map<chrposlen_t, std::string,
+typedef std::unordered_map<chrposlen_t, uint64_t,
         std::function<uint64_t(const chrposlen_t&)>,
         std::function<bool(const chrposlen_t&, const chrposlen_t&)> > doopa_t;
 
@@ -78,9 +79,8 @@ static htsFile *dup_stdout(const char *mode)
 
 static void dedup_sam(samFile *in, const char *filename)
 {
-    int ret = 0;
-    char region[128] = { 0 };
-    int32_t chr, start, stop, len, reads = 0;
+    int32_t chr, start, stop, len;
+    uint64_t reads = 0;
 
     bam1_t *b = NULL;
     bam_hdr_t *hdr = NULL;
@@ -122,45 +122,46 @@ static void dedup_sam(samFile *in, const char *filename)
         if (b->core.tid < 0) {
             continue;
         }
-        reads++;
         chr = b->core.tid;
         start = b->core.pos;
         stop = bam_endpos(b);
         len = stop - start;
-        snprintf(region, 64, "%s:%d-%d", hdr->target_name[chr], start, stop);
-        //error("m %s", region);
-        mp[{chr, start, len}] = std::string(region);
+        mp[{chr, start, len}] = reads;
+        reads++;
     }
     hts_itr_destroy(iter);
 
     error("Found %d mapped reads, deduped to %d reads, now writing output", reads, mp.size());
 
-    for (doopa_t::iterator itr = mp.begin(); itr != mp.end(); ++itr) {
-        iter = sam_itr_querys(idx, hdr, itr->second.c_str());
-	do {
-	    ret = sam_itr_next(in, iter, b);
-	} while ((b->core.tid != std::get<0>(itr->first)) ||
-	         (b->core.pos != std::get<1>(itr->first)) ||
-		 (bam_endpos(b) != std::get<1>(itr->first) + 
-		                   std::get<2>(itr->first)));
-        /*
-        error("f %s:%d-%d b= %s:%d-%d", hdr->target_name[std::get<0>(itr->first)], 
-				std::get<1>(itr->first),
-				std::get<1>(itr->first) + std::get<2>(itr->first),
-				hdr->target_name[b->core.tid],
-				b->core.pos,
-				bam_endpos(b));
-	*/
-	if (sam_write1(out, hdr, b) < 0) {
-            error("writing to standard output failed");
-            goto clean;
+    iter = sam_itr_queryi(idx, HTS_IDX_START, 0, 0);
+    reads = 0;
+
+    while (sam_itr_next(in, iter, b) >= 0) {
+        if (b->core.tid < 0) {
+            /* Write unmapped reads as is */
+            if (sam_write1(out, hdr, b) < 0) {
+                error("writing to standard output failed");
+                goto clean;
+            }
+            continue;
         }
-        hts_itr_destroy(iter);
+        chr = b->core.tid;
+        start = b->core.pos;
+        stop = bam_endpos(b);
+        len = stop - start;
+        if (mp[{chr, start, len}] == reads) {
+            if (sam_write1(out, hdr, b) < 0) {
+                error("writing to standard output failed");
+                goto clean;
+            }
+        }
+        reads++;
     }
 
     error("Done");
 
  clean:
+    hts_itr_destroy(iter);
     hts_idx_destroy(idx);
     bam_hdr_destroy(hdr);
     bam_destroy1(b);
