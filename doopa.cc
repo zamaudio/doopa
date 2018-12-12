@@ -82,7 +82,6 @@ static void dedup_sam(samFile *in, const char *filename)
     bam_hdr_t *hdr = NULL;
     samFile *out = NULL;
     hts_idx_t *idx = NULL;
-    hts_itr_t *iter = NULL;
 
     if ((idx = sam_index_load(in, filename)) == 0) {
         error("cannot open bam index");
@@ -105,16 +104,12 @@ static void dedup_sam(samFile *in, const char *filename)
         goto clean;
     }
 
-    if ((iter = sam_itr_queryi(idx, HTS_IDX_START, 0, 0)) == 0) {
-        error("can't create iterator from start");
-        goto clean;
-    }
-
     error("Start deduping...");
     #pragma omp parallel shared(mp)
     {
         uint64_t reads = 0;
-	int32_t chr, start, stop, len;
+        int32_t chr, start, stop, len;
+        hts_itr_t *iter = sam_itr_queryi(idx, HTS_IDX_START, 0, 0);
         bam1_t *b = bam_init1();
         if (b == NULL) { error("can't create record"); exit(1); }
         int ithread = omp_get_thread_num();
@@ -132,16 +127,14 @@ static void dedup_sam(samFile *in, const char *filename)
         }
         error("Found %d mapped reads, deduped to %d reads, now writing output", reads, mp.size());
         bam_destroy1(b);
+        hts_itr_destroy(iter);
     }
-
-    hts_itr_destroy(iter);
-
-    iter = sam_itr_queryi(idx, HTS_IDX_START, 0, 0);
 
     #pragma omp parallel shared(mp)
     {
         uint64_t reads = 0;
-	int32_t chr, start, stop, len;
+        int32_t chr, start, stop, len;
+        hts_itr_t *iter = sam_itr_queryi(idx, HTS_IDX_START, 0, 0);
         bam1_t *b = bam_init1();
         if (b == NULL) { error("can't create record"); exit(1); }
         int ithread = omp_get_thread_num();
@@ -169,11 +162,11 @@ static void dedup_sam(samFile *in, const char *filename)
             reads++;
         }
         bam_destroy1(b);
+        hts_itr_destroy(iter);
     }
     error("Done");
 
  clean:
-    hts_itr_destroy(iter);
     hts_idx_destroy(idx);
     bam_hdr_destroy(hdr);
     if (out) hts_close(out);
