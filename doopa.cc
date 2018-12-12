@@ -32,6 +32,7 @@
 #include <functional>
 #include <omp.h>
 
+#include "htslib/thread_pool.h"
 #include "htslib/hfile.h"
 #include "htslib/sam.h"
 
@@ -79,6 +80,7 @@ static htsFile *dup_stdout(const char *mode)
 
 static void dedup_sam(samFile *in, const char *filename)
 {
+    htsThreadPool p = {NULL, 0};
     uint64_t reads = 0;
     int32_t chr, start, stop, len;
     hts_itr_t *iter;
@@ -103,6 +105,14 @@ static void dedup_sam(samFile *in, const char *filename)
     out = dup_stdout("w");
     if (out == NULL) { error("reopening standard output failed"); goto clean; }
 
+    if (!(p.pool = hts_tpool_init(omp_get_num_threads()))) {
+        error("error creating thread pool");
+        goto clean;
+    }
+
+    hts_set_opt(in,  HTS_OPT_THREAD_POOL, &p);
+    hts_set_opt(out, HTS_OPT_THREAD_POOL, &p);
+
     if (sam_hdr_write(out, hdr) != 0) {
         error("writing headers to standard output failed");
         goto clean;
@@ -125,8 +135,6 @@ static void dedup_sam(samFile *in, const char *filename)
     }
     error("Found %d mapped reads, deduped to %d reads, now writing output", reads, mp.size());
     hts_itr_destroy(iter);
-
-    hts_set_threads(out, omp_get_num_threads());
 
     iter = sam_itr_queryi(idx, HTS_IDX_START, 0, 0);
     for(; sam_itr_next(in, iter, b) >= 0; reads++) {
@@ -153,9 +161,11 @@ static void dedup_sam(samFile *in, const char *filename)
 
     error("Done");
 
- clean:
     bam_destroy1(b);
     hts_itr_destroy(iter);
+
+ clean:
+    if (p.pool) hts_tpool_destroy(p.pool);
     hts_idx_destroy(idx);
     bam_hdr_destroy(hdr);
     if (out) hts_close(out);
