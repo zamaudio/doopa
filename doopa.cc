@@ -79,6 +79,10 @@ static htsFile *dup_stdout(const char *mode)
 
 static void dedup_sam(samFile *in, const char *filename)
 {
+    uint64_t reads = 0;
+    int32_t chr, start, stop, len;
+    hts_itr_t *iter;
+    bam1_t *b;
     bam_hdr_t *hdr = NULL;
     samFile *out = NULL;
     hts_idx_t *idx = NULL;
@@ -105,68 +109,53 @@ static void dedup_sam(samFile *in, const char *filename)
     }
 
     error("Start deduping...");
-    #pragma omp parallel shared(mp)
-    {
-        uint64_t reads = 0;
-        int32_t chr, start, stop, len;
-        hts_itr_t *iter = sam_itr_queryi(idx, HTS_IDX_START, 0, 0);
-        bam1_t *b = bam_init1();
-        if (b == NULL) { error("can't create record"); exit(1); }
-        int ithread = omp_get_thread_num();
-        int nthreads = omp_get_num_threads();
-        for(; sam_itr_next(in, iter, b) >= 0; reads++) {
-            if(reads % nthreads != ithread) continue;
-            if (b->core.tid < 0) {
-                continue;
-            }
-            chr = b->core.tid;
-            start = b->core.pos;
-            stop = bam_endpos(b);
-            len = stop - start;
-            mp[PACK_CHRPOSLEN(chr, start, len)] = reads; 
+
+    iter = sam_itr_queryi(idx, HTS_IDX_START, 0, 0);
+    b = bam_init1();
+    if (b == NULL) { error("can't create record"); exit(1); }
+    for(; sam_itr_next(in, iter, b) >= 0; reads++) {
+        if (b->core.tid < 0) {
+            continue;
         }
-        error("Found %d mapped reads, deduped to %d reads, now writing output", reads, mp.size());
-        bam_destroy1(b);
-        hts_itr_destroy(iter);
+        chr = b->core.tid;
+        start = b->core.pos;
+        stop = bam_endpos(b);
+        len = stop - start;
+        mp[PACK_CHRPOSLEN(chr, start, len)] = reads; 
+    }
+    error("Found %d mapped reads, deduped to %d reads, now writing output", reads, mp.size());
+    hts_itr_destroy(iter);
+
+    hts_set_threads(out, omp_get_num_threads());
+
+    iter = sam_itr_queryi(idx, HTS_IDX_START, 0, 0);
+    for(; sam_itr_next(in, iter, b) >= 0; reads++) {
+        if (b->core.tid < 0) {
+            /* Write unmapped reads as is */
+            if (sam_write1(out, hdr, b) < 0) {
+                error("writing to standard output failed");
+                exit(1);
+            }
+            continue;
+        }
+        chr = b->core.tid;
+        start = b->core.pos;
+        stop = bam_endpos(b);
+        len = stop - start;
+        if (mp[PACK_CHRPOSLEN(chr, start, len)] == reads) {
+            if (sam_write1(out, hdr, b) < 0) {
+                error("writing to standard output failed");
+                exit(1);
+            }
+        }
+        reads++;
     }
 
-    #pragma omp parallel shared(mp)
-    {
-        uint64_t reads = 0;
-        int32_t chr, start, stop, len;
-        hts_itr_t *iter = sam_itr_queryi(idx, HTS_IDX_START, 0, 0);
-        bam1_t *b = bam_init1();
-        if (b == NULL) { error("can't create record"); exit(1); }
-        int ithread = omp_get_thread_num();
-        int nthreads = omp_get_num_threads();
-        for(; sam_itr_next(in, iter, b) >= 0; reads++) {
-            if(reads % nthreads != ithread) continue;
-            if (b->core.tid < 0) {
-                /* Write unmapped reads as is */
-                if (sam_write1(out, hdr, b) < 0) {
-                    error("writing to standard output failed");
-                    exit(1);
-                }
-                continue;
-            }
-            chr = b->core.tid;
-            start = b->core.pos;
-            stop = bam_endpos(b);
-            len = stop - start;
-            if (mp[PACK_CHRPOSLEN(chr, start, len)] == reads) {
-                if (sam_write1(out, hdr, b) < 0) {
-                    error("writing to standard output failed");
-                    exit(1);
-                }
-            }
-            reads++;
-        }
-        bam_destroy1(b);
-        hts_itr_destroy(iter);
-    }
     error("Done");
 
  clean:
+    bam_destroy1(b);
+    hts_itr_destroy(iter);
     hts_idx_destroy(idx);
     bam_hdr_destroy(hdr);
     if (out) hts_close(out);
