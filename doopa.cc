@@ -63,7 +63,7 @@ void error(const char *format, ...)
 {
     va_list args;
     va_start(args, format);
-    fflush(stdout);
+    fflush(stderr);
     fprintf(stderr, "doopa: ");
     vfprintf(stderr, format, args);
     fprintf(stderr, "\n");
@@ -71,14 +71,7 @@ void error(const char *format, ...)
     va_end(args);
 }
 
-static htsFile *dup_stdout(const char *mode)
-{
-    int fd = dup(STDOUT_FILENO);
-    hFILE *hfp = (fd >= 0)? hdopen(fd, mode) : NULL;
-    return hfp? hts_hopen(hfp, "-", mode) : NULL;
-}
-
-static void dedup_sam(samFile *in, const char *filename)
+static void dedup_bam(const char *filename)
 {
     htsThreadPool p = {NULL, 0};
     uint64_t reads = 0;
@@ -87,7 +80,15 @@ static void dedup_sam(samFile *in, const char *filename)
     bam1_t *b;
     bam_hdr_t *hdr = NULL;
     samFile *out = NULL;
+    samFile *in = NULL;
     hts_idx_t *idx = NULL;
+    htsFormat _bam;
+    hts_parse_format(&_bam, "bam");
+
+    in = sam_open_format(filename, "r", (const htsFormat *)&_bam);
+    if (!in) {
+        error("cannot open bam file");
+    }
 
     if ((idx = sam_index_load(in, filename)) == 0) {
         error("cannot open bam index");
@@ -96,22 +97,22 @@ static void dedup_sam(samFile *in, const char *filename)
 
     doopa_t mp((doopa_t::size_type)1000000, key_hash, key_equal);
 
+    out = sam_open_format("/dev/stdout", "w", (const htsFormat *)&_bam);
+
+    if (out == NULL) { error("reopening standard output failed"); goto clean; }
+
+    if (!(p.pool = hts_tpool_init(8))) {
+        error("error creating thread pool");
+        goto clean;
+    }
+    hts_set_opt(in,  HTS_OPT_THREAD_POOL, &p);
+    hts_set_opt(out, HTS_OPT_THREAD_POOL, &p);
+
     hdr = sam_hdr_read(in);
     if (hdr == NULL) {
         errno = 0; error("reading headers from \"%s\" failed", filename);
         goto clean;
     }
-
-    out = dup_stdout("w");
-    if (out == NULL) { error("reopening standard output failed"); goto clean; }
-
-    if (!(p.pool = hts_tpool_init(omp_get_num_threads()))) {
-        error("error creating thread pool");
-        goto clean;
-    }
-
-    hts_set_opt(in,  HTS_OPT_THREAD_POOL, &p);
-    hts_set_opt(out, HTS_OPT_THREAD_POOL, &p);
 
     if (sam_hdr_write(out, hdr) != 0) {
         error("writing headers to standard output failed");
@@ -137,7 +138,7 @@ static void dedup_sam(samFile *in, const char *filename)
     hts_itr_destroy(iter);
 
     iter = sam_itr_queryi(idx, HTS_IDX_START, 0, 0);
-    for(; sam_itr_next(in, iter, b) >= 0; reads++) {
+    for(reads = 0; sam_itr_next(in, iter, b) >= 0; reads++) {
         if (b->core.tid < 0) {
             /* Write unmapped reads as is */
             if (sam_write1(out, hdr, b) < 0) {
@@ -156,7 +157,6 @@ static void dedup_sam(samFile *in, const char *filename)
                 exit(1);
             }
         }
-        reads++;
     }
 
     error("Done");
@@ -164,44 +164,18 @@ static void dedup_sam(samFile *in, const char *filename)
     bam_destroy1(b);
     hts_itr_destroy(iter);
 
- clean:
-    if (p.pool) hts_tpool_destroy(p.pool);
+clean:
     hts_idx_destroy(idx);
     bam_hdr_destroy(hdr);
-    if (out) hts_close(out);
+    sam_close(in);
+    if (sam_close(out) < 0) {
+        error("could not close output file");
+    }
+    if (p.pool) hts_tpool_destroy(p.pool);
 }
 
 int main(int argc, char **argv)
 {
-    hFILE *fp;
-    htsFile *hts;
-
-    if (argc == 2) {
-        fp = hopen(argv[1], "r");
-        if (fp == NULL) {
-            error("can't open \"%s\"", argv[1]);
-            return 1;
-        }
-        hts = hts_hopen(fp, argv[1], "r");
-    } else {
-        error("need bam file path and bai to exist");
-        return 1;
-    }
-
-    if (hts) {
-        switch (hts_get_format(hts)->category) {
-        case sequence_data:
-            dedup_sam(hts, argv[1]);
-            break;
-        default:
-            error("can't open bam file \"%s\": unknown format", argv[1]);
-            break;
-        }
-
-        if (hts_close(hts) < 0) error("closing \"%s\" failed", argv[1]);
-        fp = NULL;
-    }
-
-    if (fp && hclose(fp) < 0) error("closing \"%s\" failed", argv[1]);
+    dedup_bam(argv[1]);
     return 0;
 }
