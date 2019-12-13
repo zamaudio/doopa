@@ -46,7 +46,7 @@ bool key_equal(const chrposlen_t& v1, const chrposlen_t& v2) {
     return (v1 == v2);
 }
 
-typedef std::unordered_map<chrposlen_t, uint64_t,
+typedef std::unordered_map<chrposlen_t, std::pair<uint64_t, uint64_t>,
         std::function<uint64_t(const chrposlen_t&)>,
         std::function<bool(const chrposlen_t&, const chrposlen_t&)> > doopa_t;
 
@@ -58,6 +58,15 @@ typedef std::unordered_map<chrposlen_t, uint64_t,
                 (((uint64_t)(pos) & 0x7fffffff) << 24) | \
                  ((uint64_t)(len) & 0xffffff) \
               )
+
+static inline uint64_t get_qualsum(const bam1_t *b)
+{
+    int i;
+    uint64_t q;
+    uint8_t *qual = bam_get_qual(b);
+    for (i = q = 0; i < b->core.l_qseq; ++i) q += qual[i];
+    return q;
+}
 
 void error(const char *format, ...)
 {
@@ -75,6 +84,7 @@ static void dedup_bam(const char *filename)
 {
     htsThreadPool p = {NULL, 0};
     uint64_t reads = 0;
+    uint64_t qualsum, existing_qual;
     int32_t chr, start, stop, len;
     hts_itr_t *iter;
     bam1_t *b;
@@ -132,7 +142,16 @@ static void dedup_bam(const char *filename)
         start = b->core.pos;
         stop = bam_endpos(b);
         len = stop - start;
-        mp[PACK_CHRPOSLEN(chr, start, len)] = reads; 
+        qualsum = get_qualsum(b);
+        if (mp.count(PACK_CHRPOSLEN(chr, start, len))) {
+            // Key exists
+            existing_qual = std::get<1>(mp[PACK_CHRPOSLEN(chr, start, len)]);
+            if (qualsum > existing_qual) {
+                mp[PACK_CHRPOSLEN(chr, start, len)] = std::make_pair(reads, qualsum);
+            }
+        } else {
+            mp[PACK_CHRPOSLEN(chr, start, len)] = std::make_pair(reads, qualsum);
+        }
     }
     error("Found %d mapped reads, deduped to %d reads, now writing output", reads, mp.size());
     hts_itr_destroy(iter);
@@ -151,7 +170,7 @@ static void dedup_bam(const char *filename)
         start = b->core.pos;
         stop = bam_endpos(b);
         len = stop - start;
-        if (mp[PACK_CHRPOSLEN(chr, start, len)] == reads) {
+        if (std::get<0>( mp[PACK_CHRPOSLEN(chr, start, len)] ) == reads) {
             if (sam_write1(out, hdr, b) < 0) {
                 error("writing to standard output failed");
                 exit(1);
