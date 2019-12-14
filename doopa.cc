@@ -195,6 +195,10 @@ clean:
 
 int main(int argc, char **argv)
 {
+    if (argc < 2) {
+        error("needs indexed bam file as input");
+        return 1;
+    }
     dedup_bam(argv[1]);
     return 0;
 }
