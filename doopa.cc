@@ -30,7 +30,6 @@
 #include <tuple>
 #include <utility>
 #include <functional>
-#include <omp.h>
 
 #include "htslib/thread_pool.h"
 #include "htslib/hfile.h"
@@ -58,6 +57,8 @@ typedef std::unordered_map<chrposlen_t, std::pair<uint64_t, uint64_t>,
                 (((uint64_t)(pos) & 0x7fffffff) << 24) | \
                  ((uint64_t)(len) & 0xffffff) \
               )
+
+#define MAX_THREADS	8
 
 static inline uint64_t get_qualsum(const bam1_t *b)
 {
@@ -111,7 +112,7 @@ static void dedup_bam(const char *filename)
 
     if (out == NULL) { error("reopening standard output failed"); goto clean; }
 
-    if (!(p.pool = hts_tpool_init(8))) {
+    if (!(p.pool = hts_tpool_init(MAX_THREADS))) {
         error("error creating thread pool");
         goto clean;
     }
