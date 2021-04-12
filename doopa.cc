@@ -60,13 +60,22 @@ typedef std::unordered_map<chrposlen_t, std::pair<uint64_t, uint64_t>,
 
 #define MAX_THREADS	8
 
-static inline uint64_t get_qualsum(const bam1_t *b)
+static inline uint64_t get_qualsum(const bam1_t *b, uint64_t *total, uint64_t *q30)
 {
     int i;
-    uint64_t q;
+    uint64_t sum, q, len;
     uint8_t *qual = bam_get_qual(b);
-    for (i = q = 0; i < b->core.l_qseq; ++i) q += qual[i];
-    return q;
+
+    len = b->core.l_qseq;
+    for (i = sum = 0; i < len; ++i) {
+        q = qual[i];
+        sum += q;
+        if (q >= 30) {
+            (*q30)++;
+        }
+    }
+    *total += len;
+    return sum;
 }
 
 void error(const char *format, ...)
@@ -85,6 +94,10 @@ static void dedup_bam(const char *filename)
 {
     htsThreadPool p = {NULL, 0};
     uint64_t reads = 0;
+    uint64_t mapped_reads = 0;
+    uint64_t bases_above_q30 = 0;
+    uint64_t total_bases = 0;
+    uint64_t duplicate_reads = 0;
     uint64_t qualsum, existing_qual;
     int32_t chr, start, stop, len;
     hts_itr_t *iter;
@@ -139,13 +152,15 @@ static void dedup_bam(const char *filename)
         if (b->core.tid < 0) {
             continue;
         }
+        mapped_reads++;
         chr = b->core.tid;
         start = b->core.pos;
         stop = bam_endpos(b);
         len = stop - start;
-        qualsum = get_qualsum(b);
+        qualsum = get_qualsum(b, &total_bases, &bases_above_q30);
         if (mp.count(PACK_CHRPOSLEN(chr, start, len))) {
             // Key exists
+            duplicate_reads++;
             existing_qual = std::get<1>(mp[PACK_CHRPOSLEN(chr, start, len)]);
             if (qualsum > existing_qual) {
                 mp[PACK_CHRPOSLEN(chr, start, len)] = std::make_pair(reads, qualsum);
@@ -154,7 +169,11 @@ static void dedup_bam(const char *filename)
             mp[PACK_CHRPOSLEN(chr, start, len)] = std::make_pair(reads, qualsum);
         }
     }
-    error("Found %d mapped reads, deduped to %d reads, now writing output", reads, mp.size());
+    error("Total bases:\t%lld", total_bases);
+    error("Bases above Q30:\t%lld", bases_above_q30);
+    error("Total reads:\t%lld", reads);
+    error("Mapped reads:\t%lld", mapped_reads);
+    error("Duplicate reads:\t%lld", duplicate_reads);
     hts_itr_destroy(iter);
 
     iter = sam_itr_queryi(idx, HTS_IDX_START, 0, 0);
