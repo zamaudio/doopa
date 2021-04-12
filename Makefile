@@ -8,4 +8,5 @@ all:
 	$(CXX) -o doopa doopa.o htslib/libhts.a -lz -lm -lbz2 -llzma -lpthread -lcurl
 
 clean:
-	rm *.o doopa
+	$(MAKE) -C htslib clean
+	rm -f *.o doopa
