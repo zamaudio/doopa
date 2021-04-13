@@ -109,10 +109,26 @@ static void dedup_bam(const char *filename)
     htsFormat _bam;
     hts_parse_format(&_bam, "bam");
 
-    in = sam_open_format(filename, "r", (const htsFormat *)&_bam);
-    if (!in) {
-        error("cannot open bam file");
+    htsFile *fp = hts_open(filename,"r");
+    if (!fp) {
+        if (errno == ENOEXEC) {
+            error("Couldn't understand format of \"%s\"", filename);
+            exit(1);
+        } else {
+            error("Couldn't open \"%s\"", filename);
+            exit(1);
+        }
     }
+
+    enum htsExactFormat format = hts_get_format(fp)->format;
+    if (format != bam) {
+        error("File \"%s\" is not a bam file", filename);
+        exit(1);
+    }
+
+    hts_close(fp);
+
+    in = sam_open(filename, "r");
 
     if ((idx = sam_index_load(in, filename)) == 0) {
         error("cannot open bam index");
@@ -121,7 +137,7 @@ static void dedup_bam(const char *filename)
 
     doopa_t mp((doopa_t::size_type)1000000, key_hash, key_equal);
 
-    out = sam_open_format("/dev/stdout", "w", (const htsFormat *)&_bam);
+    out = sam_open("/dev/stdout", "w");
 
     if (out == NULL) { error("reopening standard output failed"); goto clean; }
 
