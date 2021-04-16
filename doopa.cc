@@ -90,7 +90,7 @@ void error(const char *format, ...)
     va_end(args);
 }
 
-static void dedup_bam(const char *filename)
+static void dedup_bam(const char *filename, bool stats_only)
 {
     htsThreadPool p = {NULL, 0};
     uint64_t reads = 0;
@@ -154,9 +154,11 @@ static void dedup_bam(const char *filename)
         goto clean;
     }
 
-    if (sam_hdr_write(out, hdr) != 0) {
-        error("writing headers to standard output failed");
-        goto clean;
+    if (!stats_only) {
+        if (sam_hdr_write(out, hdr) != 0) {
+            error("writing headers to standard output failed");
+            goto clean;
+        }
     }
 
     error("Start deduping...");
@@ -193,27 +195,28 @@ static void dedup_bam(const char *filename)
     hts_itr_destroy(iter);
 
     iter = sam_itr_queryi(idx, HTS_IDX_START, 0, 0);
-    for(reads = 0; sam_itr_next(in, iter, b) >= 0; reads++) {
-        if (b->core.tid < 0) {
-            /* Write unmapped reads as is */
-            if (sam_write1(out, hdr, b) < 0) {
-                error("writing to standard output failed");
-                exit(1);
+    if (!stats_only) {
+        for(reads = 0; sam_itr_next(in, iter, b) >= 0; reads++) {
+            if (b->core.tid < 0) {
+                /* Write unmapped reads as is */
+                if (sam_write1(out, hdr, b) < 0) {
+                    error("writing to standard output failed");
+                    exit(1);
+                }
+                continue;
             }
-            continue;
-        }
-        chr = b->core.tid;
-        start = b->core.pos;
-        stop = bam_endpos(b);
-        len = stop - start;
-        if (std::get<0>( mp[PACK_CHRPOSLEN(chr, start, len)] ) == reads) {
-            if (sam_write1(out, hdr, b) < 0) {
-                error("writing to standard output failed");
-                exit(1);
+            chr = b->core.tid;
+            start = b->core.pos;
+            stop = bam_endpos(b);
+            len = stop - start;
+            if (std::get<0>( mp[PACK_CHRPOSLEN(chr, start, len)] ) == reads) {
+                if (sam_write1(out, hdr, b) < 0) {
+                    error("writing to standard output failed");
+                    exit(1);
+                }
             }
         }
     }
-
     error("Done");
 
     bam_destroy1(b);
@@ -235,6 +238,14 @@ int main(int argc, char **argv)
         error("needs indexed bam file as input");
         return 1;
     }
-    dedup_bam(argv[1]);
+    if (!strcmp(argv[1], "--statsonly")) {
+        if (argc < 3) {
+            error("needs indexed bam file as input");
+            return 1;
+        }
+        dedup_bam(argv[2], true);
+    } else {
+        dedup_bam(argv[1], false);
+    }
     return 0;
 }
