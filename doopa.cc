@@ -31,6 +31,7 @@
 #include <tuple>
 #include <utility>
 #include <functional>
+#include <math.h>
 
 #include "htslib/thread_pool.h"
 #include "htslib/hfile.h"
@@ -95,6 +96,42 @@ void error(const char *format, ...)
     fprintf(stderr, "\n");
     fflush(stderr);
     va_end(args);
+}
+
+void print_frag_stats(fragment_t *frag_hist, uint64_t total_fragments)
+{
+    float half_dist = total_fragments * 0.5f;
+    float csum = 0.f;
+    float dist = 0.f;
+    float mean = 0.f;
+    float stdev = 0.f;
+    float cstd = 0.f;
+    float median = 0.f;
+    int found = 0;
+
+    for (fragment_t::iterator frag = frag_hist->begin(); frag != frag_hist->end(); frag++) {
+        float mi = (float)frag->first * (float)FRAGMENT_BIN_SIZE + (float)FRAGMENT_BIN_SIZE * 0.5f;
+        float curr = mi * (float)frag->second;
+        dist += (float)frag->second;
+        csum += curr;
+        if (!found && (dist >= half_dist)) {
+            /* L + ( (n/2 – F) / f ) * w */
+            median = ((float)frag->first * (float)FRAGMENT_BIN_SIZE) + ((half_dist - dist) / (float)frag->second) * (float)FRAGMENT_BIN_SIZE;
+            found = 1;
+        }
+    }
+    mean = csum / (float)total_fragments;
+
+    for (fragment_t::iterator frag = frag_hist->begin(); frag != frag_hist->end(); frag++) {
+        float mi = (float)frag->first * (float)FRAGMENT_BIN_SIZE + (float)FRAGMENT_BIN_SIZE * 0.5f;
+        float cmu = mi - mean;
+        cstd += (float)frag->second * cmu * cmu;
+    }
+    stdev = sqrt(cstd / ((float)total_fragments - 1.f));
+
+    error("Mean fragment size: %.4f", mean);
+    error("Median fragment size: %.0f", median);
+    error("Stdev fragment size: %.4f", stdev);
 }
 
 static void dedup_bam(const char *filename, bool stats_only)
@@ -215,6 +252,7 @@ static void dedup_bam(const char *filename, bool stats_only)
     error("Paired reads:\t%lld", paired_reads);
     error("Mapped reads:\t%lld", mapped_reads);
     error("Duplicate reads:\t%lld", duplicate_reads);
+    print_frag_stats(&fragment_histogram, paired_reads / 2);
     error("");
 
     error("Fragment Histogram:");
