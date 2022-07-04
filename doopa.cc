@@ -67,6 +67,7 @@ typedef std::map<uint64_t, uint64_t> fragment_t;
 
 #define MAX_THREADS	8
 #define FRAGMENT_BIN_SIZE 5
+#define MAX_FRAGMENT_SIZE 2000
 
 static inline uint64_t get_qualsum(const bam1_t *b, uint64_t *total, uint64_t *q30)
 {
@@ -144,7 +145,6 @@ static void dedup_bam(const char *filename, bool stats_only)
     uint64_t total_bases = 0;
     uint64_t duplicate_reads = 0;
     uint64_t qualsum, existing_qual, fragment_bin;
-    int64_t fragment_size;
     int32_t chr, start, stop, len, chr2, start2;
     hts_itr_t *iter;
     bam1_t *b;
@@ -214,24 +214,30 @@ static void dedup_bam(const char *filename, bool stats_only)
     b = bam_init1();
     if (b == NULL) { error("can't create record"); exit(1); }
     for(; sam_itr_next(in, iter, b) >= 0; total_reads++) {
-        if (b->core.tid < 0) {
+        const bam1_core_t *c = &b->core;
+        if (c->tid < 0) {
             continue;
         }
         mapped_reads++;
-        chr = b->core.tid;
-        start = b->core.pos;
+        chr = c->tid;
+        start = c->pos;
         stop = bam_endpos(b);
         len = stop - start;
         chr2 = 0;
         start2 = 0;
-        if (b->core.mtid >= 0) {
-            chr2 = b->core.mtid;
-            start2 = b->core.mpos;
-            fragment_size = b->core.isize;
-            if (fragment_size > 0 && fragment_size < 10000) {
-                paired_reads += 2;
-                fragment_bin = fragment_size / FRAGMENT_BIN_SIZE;
+        if (c->mtid >= 0) {
+            chr2 = c->mtid;
+            start2 = c->mpos;
+            if ((c->flag & BAM_FPROPER_PAIR) == BAM_FPROPER_PAIR &&
+                    (c->flag & BAM_FSECONDARY) != BAM_FSECONDARY &&
+                    c->isize > 0 && c->qual > 30) {
+                if (c->isize > MAX_FRAGMENT_SIZE) {
+                    fragment_bin = MAX_FRAGMENT_SIZE / FRAGMENT_BIN_SIZE;
+                } else {
+                    fragment_bin = c->isize / FRAGMENT_BIN_SIZE;
+                }
                 fragment_histogram[fragment_bin]++;
+                paired_reads += 2;
             }
         }
         qualsum = get_qualsum(b, &total_bases, &bases_above_q30);
@@ -266,7 +272,8 @@ static void dedup_bam(const char *filename, bool stats_only)
     iter = sam_itr_queryi(idx, HTS_IDX_START, 0, 0);
     if (!stats_only) {
         for(total_reads = 0; sam_itr_next(in, iter, b) >= 0; total_reads++) {
-            if (b->core.tid < 0) {
+            const bam1_core_t *c = &b->core;
+            if (c->tid < 0) {
                 /* Write unmapped reads as is */
                 if (sam_write1(out, hdr, b) < 0) {
                     error("writing to standard output failed");
@@ -274,15 +281,15 @@ static void dedup_bam(const char *filename, bool stats_only)
                 }
                 continue;
             }
-            chr = b->core.tid;
-            start = b->core.pos;
+            chr = c->tid;
+            start = c->pos;
             stop = bam_endpos(b);
             len = stop - start;
             chr2 = 0;
             start2 = 0;
-            if (b->core.mtid >= 0) {
-                chr2 = b->core.mtid;
-                start2 = b->core.mpos;
+            if (c->mtid >= 0) {
+                chr2 = c->mtid;
+                start2 = c->mpos;
             }
 
             if (std::get<0>( mp[{PACK_CHRPOSLEN(chr, start, len), PACK_CHRPOSLEN(chr2, start2, len)}] ) == total_reads) {
