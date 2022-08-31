@@ -37,13 +37,34 @@
 #include "htslib/hfile.h"
 #include "htslib/sam.h"
 
+// Pack into 64 bits:
+// chr  start   len
+// ff8 7fffffff ffffff
+#define PACK_CHRPOSLEN(chr, pos, len) \
+    (uint64_t)( (((uint64_t)(chr) & 0x1ff) << 55) | \
+                (((uint64_t)(pos) & 0x7fffffff) << 24) | \
+                 ((uint64_t)(len) & 0xffffff) \
+              )
+
+#define PACK_STARTPOS(pos1, pos2) \
+    (uint64_t)( (((uint64_t)(pos1)) << 32) | \
+                 ((uint64_t)(pos2)) \
+              )
+
+#define EXTRACT_STARTPOS(chrposlen) \
+    (uint64_t)( ((uint64_t)(chrposlen >> 24) & 0x7fffffff) )
+
+#define MAX_THREADS	8
+#define FRAGMENT_BIN_SIZE 5
+#define MAX_FRAGMENT_SIZE 2000
+
 typedef struct {
   uint64_t lo;
   uint64_t hi;
 } chrposlen_t;
 
 size_t key_hash(const chrposlen_t& k) {
-    return (k.lo & 0x5a5a5a5a5a5a5a5aull) | (k.hi & 0xa5a5a5a5a5a5a5a5ull);
+    return PACK_STARTPOS(EXTRACT_STARTPOS(k.lo), EXTRACT_STARTPOS(k.hi));
 }
 
 bool key_equal_to(const chrposlen_t& k1, const chrposlen_t& k2) {
@@ -55,19 +76,6 @@ typedef std::unordered_map<chrposlen_t, std::pair<uint64_t, uint64_t>,
         std::function<bool(const chrposlen_t&, const chrposlen_t&)> > doopa_t;
 
 typedef std::map<uint64_t, uint64_t> fragment_t;
-
-// Pack into 64 bits:
-// chr  start   len
-// ff8 7fffffff ffffff
-#define PACK_CHRPOSLEN(chr, pos, len) \
-    (uint64_t)( (((uint64_t)(chr) & 0x1ff) << 55) | \
-                (((uint64_t)(pos) & 0x7fffffff) << 24) | \
-                 ((uint64_t)(len) & 0xffffff) \
-              )
-
-#define MAX_THREADS	8
-#define FRAGMENT_BIN_SIZE 5
-#define MAX_FRAGMENT_SIZE 2000
 
 static inline uint64_t get_qualsum(const bam1_t *b, uint64_t *total, uint64_t *q30)
 {
@@ -241,15 +249,15 @@ static void dedup_bam(const char *filename, bool stats_only)
             }
         }
         qualsum = get_qualsum(b, &total_bases, &bases_above_q30);
-        if (mp.count({PACK_CHRPOSLEN(chr, start, len), PACK_CHRPOSLEN(chr2, start2, len)})) {
+        if (mp.count({PACK_CHRPOSLEN(chr, start, len), PACK_CHRPOSLEN(chr2, start2, 0)})) {
             // Key exists
             duplicate_reads++;
-            existing_qual = std::get<1>(mp[{PACK_CHRPOSLEN(chr, start, len), PACK_CHRPOSLEN(chr2, start2, len)}]);
+            existing_qual = std::get<1>(mp[{PACK_CHRPOSLEN(chr, start, len), PACK_CHRPOSLEN(chr2, start2, 0)}]);
             if (qualsum > existing_qual) {
-                mp[{PACK_CHRPOSLEN(chr, start, len), PACK_CHRPOSLEN(chr2, start2, len)}] = std::make_pair(total_reads, qualsum);
+                mp[{PACK_CHRPOSLEN(chr, start, len), PACK_CHRPOSLEN(chr2, start2, 0)}] = std::make_pair(total_reads, qualsum);
             }
         } else {
-            mp[{PACK_CHRPOSLEN(chr, start, len), PACK_CHRPOSLEN(chr2, start2, len)}] = std::make_pair(total_reads, qualsum);
+            mp[{PACK_CHRPOSLEN(chr, start, len), PACK_CHRPOSLEN(chr2, start2, 0)}] = std::make_pair(total_reads, qualsum);
         }
     }
     error("Total bases:\t%lld", total_bases);
@@ -292,7 +300,7 @@ static void dedup_bam(const char *filename, bool stats_only)
                 start2 = c->mpos;
             }
 
-            if (std::get<0>( mp[{PACK_CHRPOSLEN(chr, start, len), PACK_CHRPOSLEN(chr2, start2, len)}] ) == total_reads) {
+            if (std::get<0>( mp[{PACK_CHRPOSLEN(chr, start, len), PACK_CHRPOSLEN(chr2, start2, 0)}] ) == total_reads) {
                 if (sam_write1(out, hdr, b) < 0) {
                     error("writing to standard output failed");
                     exit(1);
