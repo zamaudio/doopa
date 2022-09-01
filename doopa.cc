@@ -33,6 +33,8 @@
 #include <functional>
 #include <math.h>
 
+#include <openssl/sha.h>
+
 #include "htslib/thread_pool.h"
 #include "htslib/hfile.h"
 #include "htslib/sam.h"
@@ -64,7 +66,14 @@ typedef struct {
 } chrposlen_t;
 
 size_t key_hash(const chrposlen_t& k) {
-    return PACK_STARTPOS(EXTRACT_STARTPOS(k.lo), EXTRACT_STARTPOS(k.hi));
+    uint64_t result;
+    const uint8_t *ptr = (const uint8_t *)&k;
+    uint8_t resbuf[32] = {0};
+
+    SHA256(ptr, 16, resbuf);
+
+    result = *((uint64_t *)resbuf);
+    return result;
 }
 
 bool key_equal_to(const chrposlen_t& k1, const chrposlen_t& k2) {
