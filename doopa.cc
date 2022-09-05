@@ -56,6 +56,8 @@
 #define EXTRACT_STARTPOS(chrposlen) \
     (uint64_t)( ((uint64_t)(chrposlen >> 24) & 0x7fffffff) )
 
+#define ABS(x)  ((x < 0) ? (-x) : (x))
+
 #define MAX_THREADS	8
 #define FRAGMENT_BIN_SIZE 5
 #define MAX_FRAGMENT_SIZE 2000
@@ -68,12 +70,161 @@ typedef struct {
 size_t key_hash(const chrposlen_t& k) {
     uint64_t result;
     const uint8_t *ptr = (const uint8_t *)&k;
-    uint8_t resbuf[32] = {0};
+    uint8_t sha[SHA256_DIGEST_LENGTH] = {0};
 
-    SHA256(ptr, 16, resbuf);
+    SHA256(ptr, 16, sha);
 
-    result = *((uint64_t *)resbuf);
+    result = *((uint64_t *)sha);
     return result;
+}
+
+void error(const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    fflush(stderr);
+    fprintf(stderr, "doopa: ");
+    vfprintf(stderr, format, args);
+    fprintf(stderr, "\n");
+    fflush(stderr);
+    va_end(args);
+}
+
+/* Calculate the current read's start based on the stored cigar string. */
+static int32_t unclipped_start(bam1_t *b) {
+    uint32_t *cigar = bam_get_cigar(b);
+    int32_t clipped = 0;
+    uint32_t i;
+
+    for (i = 0; i < b->core.n_cigar; i++) {
+        char c = bam_cigar_opchr(cigar[i]);
+
+        if (c == 'S' || c == 'H') { // clips
+            clipped += bam_cigar_oplen(cigar[i]);
+        } else {
+            break;
+        }
+    }
+
+    return b->core.pos - clipped + 1;
+}
+
+/* Calculate the current read's end based on the stored cigar string. */
+static int32_t unclipped_end(bam1_t *b) {
+    uint32_t *cigar = bam_get_cigar(b);
+    int32_t end_pos, clipped = 0;
+    int32_t i;
+
+    end_pos = bam_endpos(b);
+
+    // now get the clipped end bases (if any)
+    // if we get to the beginning of the cigar string
+    // without hitting a non-clip then the results are meaningless
+    for (i = b->core.n_cigar - 1; i >= 0; i--) {
+        char c = bam_cigar_opchr(cigar[i]);
+
+        if (c == 'S' || c == 'H') { // clips
+            clipped += bam_cigar_oplen(cigar[i]);
+        } else {
+            break;
+        }
+    }
+
+    return end_pos + clipped;
+}
+
+/* Calculate the mate's unclipped start based on position and cigar string from MC tag. */
+static int32_t unclipped_other_start(int32_t op, char *cigar) {
+    char *c = cigar;
+    int32_t clipped = 0;
+
+    while (*c && *c != '*') {
+        long num = 0;
+
+        if (isdigit((int)*c)) {
+            num = strtol(c, &c, 10);
+        } else {
+            num = 1;
+        }
+
+        if (*c == 'S' || *c == 'H') { // clips
+            clipped += num;
+        } else {
+            break;
+        }
+
+        c++;
+    }
+    return op - clipped + 1;
+}
+
+/* Calculate the mate's unclipped end based on start position and cigar string from MC tag.*/
+static int32_t unclipped_other_end(int32_t op, char *cigar) {
+    char *c = cigar;
+    int32_t refpos = 0;
+    int skip = 1;
+
+    while (*c && *c != '*') {
+        long num = 0;
+
+        if (isdigit((int)*c)) {
+            num = strtol(c, &c, 10);
+        } else {
+            num = 1;
+        }
+
+        switch (*c) {
+            case 'M':
+            case 'D':
+            case 'N':
+            case '=':
+            case 'X':
+                refpos += num;
+                skip = 0; // ignore initial clips
+            break;
+
+            case 'S':
+            case 'H':
+                if (!skip)
+                    refpos += num;
+            break;
+        }
+
+        c++;
+    }
+    return op + refpos;
+}
+
+/* Create a signature hash of the current read and its pair.
+   Uses the unclipped start and end of read and its pair. */
+static void make_key(chrposlen_t *key, bam1_t *bam) {
+    int32_t chr1, chr2, start1, start2, len1, len2, tmp;
+    uint8_t *data;
+    char *cig;
+
+    chr1   = bam->core.tid;
+    start1 = unclipped_start(bam);
+    len1   = unclipped_end(bam) - start1;
+    chr2   = 0;
+    start2 = 0;
+    len2   = 0;
+
+    if (bam->core.mtid >= 0) {
+        chr2 = bam->core.mtid;
+        if ((data = bam_aux_get(bam, "MC"))) {
+            cig = bam_aux2Z(data);
+            start2 = unclipped_other_start(bam->core.mpos, cig);
+            tmp = unclipped_other_end(bam->core.mpos, cig) - start2;
+            len2 = ABS(tmp);
+        } else {
+            start1 = bam->core.pos;
+            len1 = bam_endpos(bam) - start1;
+            start2 = bam->core.mpos;
+            len2 = len1;
+        }
+    }
+    key->lo = PACK_CHRPOSLEN(chr1, start1, len1);
+    key->hi = PACK_CHRPOSLEN(chr2, start2, len2);
 }
 
 bool key_equal_to(const chrposlen_t& k1, const chrposlen_t& k2) {
@@ -96,24 +247,13 @@ static inline uint64_t get_qualsum(const bam1_t *b, uint64_t *total, uint64_t *q
     for (i = sum = 0; i < len; ++i) {
         q = qual[i];
         sum += q;
-        if (q >= 30) {
+        if (q30 && q >= 30) {
             (*q30)++;
         }
     }
-    *total += len;
+    if (total)
+        *total += len;
     return sum;
-}
-
-void error(const char *format, ...)
-{
-    va_list args;
-    va_start(args, format);
-    fflush(stderr);
-    fprintf(stderr, "doopa: ");
-    vfprintf(stderr, format, args);
-    fprintf(stderr, "\n");
-    fflush(stderr);
-    va_end(args);
 }
 
 void print_frag_stats(fragment_t *frag_hist, uint64_t total_fragments)
@@ -162,7 +302,7 @@ static void dedup_bam(const char *filename, bool stats_only)
     uint64_t total_bases = 0;
     uint64_t duplicate_reads = 0;
     uint64_t qualsum, existing_qual, fragment_bin;
-    int32_t chr, start, stop, len, chr2, start2;
+    chrposlen_t key;
     hts_itr_t *iter;
     bam1_t *b;
     bam_hdr_t *hdr = NULL;
@@ -235,18 +375,13 @@ static void dedup_bam(const char *filename, bool stats_only)
         if (c->tid < 0) {
             continue;
         }
+        // read must not be secondary, supplementary, unmapped or failed QC
+        if (c->flag & (BAM_FSECONDARY | BAM_FSUPPLEMENTARY | BAM_FUNMAP | BAM_FQCFAIL)) {
+            continue;
+        }
         mapped_reads++;
-        chr = c->tid;
-        start = c->pos;
-        stop = bam_endpos(b);
-        len = stop - start;
-        chr2 = 0;
-        start2 = 0;
         if (c->mtid >= 0) {
-            chr2 = c->mtid;
-            start2 = c->mpos;
-            if ((c->flag & BAM_FPROPER_PAIR) == BAM_FPROPER_PAIR &&
-                    (c->flag & BAM_FSECONDARY) != BAM_FSECONDARY &&
+            if ((c->flag & BAM_FPROPER_PAIR) &&
                     c->isize > 0 && c->qual > 30) {
                 if (c->isize > MAX_FRAGMENT_SIZE) {
                     fragment_bin = MAX_FRAGMENT_SIZE / FRAGMENT_BIN_SIZE;
@@ -257,16 +392,17 @@ static void dedup_bam(const char *filename, bool stats_only)
                 paired_reads += 2;
             }
         }
+        make_key(&key, b);
         qualsum = get_qualsum(b, &total_bases, &bases_above_q30);
-        if (mp.count({PACK_CHRPOSLEN(chr, start, len), PACK_CHRPOSLEN(chr2, start2, 0)})) {
+        if (mp.count(key)) {
             // Key exists
             duplicate_reads++;
-            existing_qual = std::get<1>(mp[{PACK_CHRPOSLEN(chr, start, len), PACK_CHRPOSLEN(chr2, start2, 0)}]);
+            existing_qual = std::get<1>(mp[key]);
             if (qualsum > existing_qual) {
-                mp[{PACK_CHRPOSLEN(chr, start, len), PACK_CHRPOSLEN(chr2, start2, 0)}] = std::make_pair(total_reads, qualsum);
+                mp[key] = std::make_pair(total_reads, qualsum);
             }
         } else {
-            mp[{PACK_CHRPOSLEN(chr, start, len), PACK_CHRPOSLEN(chr2, start2, 0)}] = std::make_pair(total_reads, qualsum);
+            mp[key] = std::make_pair(total_reads, qualsum);
         }
     }
     error("Total bases:\t%lld", total_bases);
@@ -298,18 +434,9 @@ static void dedup_bam(const char *filename, bool stats_only)
                 }
                 continue;
             }
-            chr = c->tid;
-            start = c->pos;
-            stop = bam_endpos(b);
-            len = stop - start;
-            chr2 = 0;
-            start2 = 0;
-            if (c->mtid >= 0) {
-                chr2 = c->mtid;
-                start2 = c->mpos;
-            }
-
-            if (std::get<0>( mp[{PACK_CHRPOSLEN(chr, start, len), PACK_CHRPOSLEN(chr2, start2, 0)}] ) == total_reads) {
+            make_key(&key, b);
+            qualsum = get_qualsum(b, NULL, NULL);
+            if ((qualsum == std::get<1>(mp[key])) && (std::get<0>( mp[key] ) == total_reads)) {
                 if (sam_write1(out, hdr, b) < 0) {
                     error("writing to standard output failed");
                     exit(1);
