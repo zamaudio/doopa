@@ -198,13 +198,18 @@ static int32_t unclipped_other_end(int32_t op, char *cigar) {
 /* Create a signature hash of the current read and its pair.
    Uses the unclipped start and end of read and its pair. */
 static void make_key(chrposlen_t *key, bam1_t *bam) {
-    int32_t chr1, chr2, start1, start2, len1, len2, tmp;
+    uint32_t chr1, chr2, start1, start2, len1, len2, tmp;
     uint8_t *data;
     char *cig;
 
     chr1   = bam->core.tid;
     start1 = unclipped_start(bam);
-    len1   = unclipped_end(bam) - start1;
+    tmp    = unclipped_end(bam);
+    if (start1 > tmp) {
+        len1 = (start1 - tmp) | (1 << 23);
+    } else {
+        len1 = tmp - start1;
+    }
     chr2   = 0;
     start2 = 0;
     len2   = 0;
@@ -214,11 +219,13 @@ static void make_key(chrposlen_t *key, bam1_t *bam) {
         if ((data = bam_aux_get(bam, "MC"))) {
             cig = bam_aux2Z(data);
             start2 = unclipped_other_start(bam->core.mpos, cig);
-            tmp = unclipped_other_end(bam->core.mpos, cig) - start2;
-            len2 = ABS(tmp);
+            tmp = unclipped_other_end(bam->core.mpos, cig);
+            if (start2 > tmp) {
+                len2 = (start2 - tmp) | (1 << 23);
+            } else {
+                len2 = tmp - start2;
+            }
         } else {
-            start1 = bam->core.pos;
-            len1 = bam_endpos(bam) - start1;
             start2 = bam->core.mpos;
             len2 = len1;
         }
