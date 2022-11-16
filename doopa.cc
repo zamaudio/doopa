@@ -205,29 +205,33 @@ static void make_key(chrposlen_t *key, bam1_t *bam) {
     chr1   = bam->core.tid;
     start1 = unclipped_start(bam);
     tmp    = unclipped_end(bam);
-    if (start1 > tmp) {
-        len1 = (start1 - tmp) | (1 << 23);
+    if (bam->core.flag & BAM_FREVERSE) {
+        len1 = ABS(tmp - start1) | (1 << 23);
     } else {
-        len1 = tmp - start1;
+        len1 = ABS(tmp - start1);
     }
     chr2   = 0;
     start2 = 0;
     len2   = 0;
 
-    if (bam->core.mtid >= 0) {
+    if (bam->core.mtid >= 0 && ((bam->core.flag & BAM_FMUNMAP) == 0)) {
         chr2 = bam->core.mtid;
         if ((data = bam_aux_get(bam, "MC"))) {
             cig = bam_aux2Z(data);
             start2 = unclipped_other_start(bam->core.mpos, cig);
             tmp = unclipped_other_end(bam->core.mpos, cig);
-            if (start2 > tmp) {
-                len2 = (start2 - tmp) | (1 << 23);
+            if (bam->core.flag & BAM_FMREVERSE) {
+                len2 = ABS(tmp - start2) | (1 << 23);
             } else {
-                len2 = tmp - start2;
+                len2 = ABS(tmp - start2);
             }
         } else {
             start2 = bam->core.mpos;
-            len2 = len1;
+            if (bam->core.flag & BAM_FMREVERSE) {
+                len2 = len1 | (1 << 23);
+            } else {
+                len2 = len1 & ~(1 << 23);
+            }
         }
     }
     key->lo = PACK_CHRPOSLEN(chr1, start1, len1);
@@ -299,7 +303,7 @@ void print_frag_stats(fragment_t *frag_hist, uint64_t total_fragments)
     error("Stdev fragment size: %.4f", stdev);
 }
 
-static void dedup_bam(const char *filename, bool stats_only)
+static void dedup_bam(const char *filename, bool stats_only, const char *debugread)
 {
     htsThreadPool p = {NULL, 0};
     uint64_t total_reads = 0;
@@ -379,6 +383,9 @@ static void dedup_bam(const char *filename, bool stats_only)
     if (b == NULL) { error("can't create record"); exit(1); }
     for(; sam_itr_next(in, iter, b) >= 0; total_reads++) {
         const bam1_core_t *c = &b->core;
+        if (*debugread && !strncmp((const char *)b->data, debugread, 128)) {
+            error("found debugread %s", debugread);
+        }
         if (c->tid < 0) {
             continue;
         }
@@ -468,18 +475,47 @@ clean:
 
 int main(int argc, char **argv)
 {
+    int c;
+    bool statsonly = false;
+    char debugread[128] = {0};
+    char bamfile[1024] = {0};
+
     if (argc < 2) {
         error("needs indexed bam file as input");
         return 1;
     }
-    if (!strcmp(argv[1], "--statsonly")) {
-        if (argc < 3) {
-            error("needs indexed bam file as input");
-            return 1;
+
+    while (1) {
+        int option_index = 0;
+        static struct option long_options[] = {
+            {"statsonly", no_argument,       0, 's' },
+            {"debugread", required_argument, 0, 'd' },
+            {0,           0,                 0,  0  }
+        };
+
+        c = getopt_long(argc, argv, "sd:", long_options, &option_index);
+        if (c == -1)
+            break;
+
+        switch (c) {
+        case 's':
+            statsonly = true;
+            break;
+
+        case 'd':
+            snprintf(debugread, 128, optarg);
+            break;
+
+        default:
+            printf("Invalid option code 0%o\n", c);
         }
-        dedup_bam(argv[2], true);
-    } else {
-        dedup_bam(argv[1], false);
     }
+
+    if (optind < argc) {
+        snprintf(bamfile, 1024, argv[optind]);
+    }
+
+    dedup_bam(bamfile, statsonly, debugread);
+
     return 0;
 }
